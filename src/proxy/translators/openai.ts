@@ -22,6 +22,7 @@ import {
   touchStateTimestamp,
   StreamContext,
 } from '../shared';
+import { maybeWrapContextToolResult } from '../../context/toolResult';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,7 @@ interface GeminiFunctionCall {
 interface GeminiFunctionResponse {
   name: string;
   response: unknown;
+  args?: Record<string, unknown>;
   id?: string;
 }
 
@@ -255,6 +257,7 @@ export function mapGeminiToOpenAI(geminiBody: GeminiRequestBody, modelName: stri
               } else {
                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
               }
+              contentStr = maybeWrapContextToolResult(funcName, p.functionResponse.args, contentStr);
               messages.push({ role: 'tool', content: contentStr, tool_call_id: toolCallId });
             }
           }

@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { encryptString, decryptString } from './crypto';
+import type { ReasoningEffort } from './context/reasoningEffort';
 
 export interface CustomModelEntry {
   name: string;
@@ -19,6 +20,9 @@ export interface CustomModelEntry {
   encrypted?: boolean;
   timeout?: number;
   maxRetries?: number;
+  contextWindow?: number;
+  reasoningEffort?: ReasoningEffort;
+  compaction?: boolean;
 }
 
 export function getConfigDir(): string {

@@ -8,6 +8,8 @@
 
 Use **OpenAI, Anthropic, Ollama, OpenRouter, Google AI Studio, and any OpenAI-compatible provider** alongside Gemini models — all through the native `agy` CLI experience.
 
+> **This is a fork of [vahapogut/free-antigravity-cli](https://github.com/vahapogut/free-antigravity-cli)** that adds the agent-context system from [12errh/antigravity-proxy](https://github.com/12errh/antigravity-proxy), so custom models get Antigravity's tool manual instead of guessing. See [Agent Context](#agent-context).
+
 <p align="center">
   <img src="free-antigravity-image.png" alt="Free Antigravity CLI Demo" width="800"/>
 </p>
@@ -18,6 +20,7 @@ Use **OpenAI, Anthropic, Ollama, OpenRouter, Google AI Studio, and any OpenAI-co
 ## Quick Links
 
 * [How It Works](#how-it-works)
+* [Agent Context](#agent-context)
 * [Quick Start](#quick-start)
 * [Prerequisites](#prerequisites)
 * [Commands](#commands)
@@ -50,6 +53,64 @@ antigravity
 ```
 
 The CLI is a thin wrapper: it starts a local HTTP proxy that intercepts `fetchAvailableModels` API calls, injects your custom model definitions, then hands off to the official `agy` CLI. You get the full native Antigravity CLI experience plus custom models.
+
+
+## Agent Context
+
+Custom models (GPT, Claude, Llama, Mistral, …) never see Antigravity's own system prompt — that prompt is written for Gemini and assumes the model already knows Antigravity's tool vocabulary. Without it, custom models fall back to `run_command ls`, forget `manage_task` needs an `Action`, and stall on simple edits.
+
+This fork ships the operating manual from [12errh/antigravity-proxy](https://github.com/12errh/antigravity-proxy) and injects it into the system instruction before translation, so every provider gets the same tool discipline Gemini has.
+
+```
+agy request
+  └─ proxy intercepts generateContent for a custom model
+       ├─ replace native system instruction with agent-context-lite.md
+       │    + hardened envelope ("documentation, not runtime state")
+       ├─ compact the conversation if it nears the model's context window
+       ├─ apply reasoning_effort for thinking models
+       └─ translate to the provider's format
+```
+
+**Only custom models are injected.** Requests forwarded to Google's Gemini endpoints keep Antigravity's native prompt untouched — Gemini already understands it, so injecting would only waste tokens.
+
+### Context modes
+
+| Mode | Behavior | Tokens |
+|---|---|---|
+| `lite` (default) | Replace native instruction with `agent-context-lite.md` | ~3.7K |
+| `strip` | Replace native instruction with the full `agent-context.md` | ~10K |
+| `passthrough` | Never inject; forward Antigravity's native instruction | 0 |
+
+```bash
+antigravity context status              # show mode, sources, token cost
+antigravity context set mode lite       # passthrough | lite | strip
+antigravity context install             # install the manuals to ~/.antigravity
+antigravity context show-file lite      # print the manual that gets injected
+antigravity context set compaction on   # auto-compact near the context window
+antigravity context set keep-native on  # append (instead of replace) the native instruction
+```
+
+Settings persist to `~/.free-antigravity/context.json` and can be overridden per invocation with `ANTIGRAVITY_CONTEXT_MODE`, `ANTIGRAVITY_CONTEXT=false`, `AGENT_CONTEXT_LITE_PATH`, and `COMPACTION_*`.
+
+### Per-model tuning
+
+Add a model with a declared context window and reasoning effort so compaction kicks in at the right point and thinking models get a `reasoning_effort` parameter:
+
+```bash
+antigravity models add
+# Provider: openai
+# Model ID: o3-mini
+# Context window in tokens: 200000
+# Reasoning effort: medium
+```
+
+Or set reasoning effort for an existing model:
+
+```bash
+antigravity context effort deepseek-r1 high
+```
+
+Auto-detected reasoning families: DeepSeek R-series, OpenAI o-series, NVIDIA stepfun, Qwen/QwQ, GLM and Kimi thinking variants, plus any model ending in `-thinking` / `-reasoner`.
 
 
 ## Quick Start
@@ -92,6 +153,10 @@ antigravity models list  List configured custom models
 antigravity models add   Add a new custom model (interactive wizard)
 antigravity models remove <name>  Remove a custom model
 antigravity models import  Import models from desktop Antigravity
+antigravity context status  Show agent context mode, sources and token cost
+antigravity context install  Install the manuals to ~/.antigravity
+antigravity context set <key> <value>  Change context settings
+antigravity context effort [model] [level]  Show or set reasoning effort
 antigravity configure    Show configuration info
 antigravity version      Show version
 antigravity help         Show this help
@@ -175,8 +240,40 @@ Models are stored in `~/.free-antigravity/models.json`:
       "apiKey": "none",
       "apiUrl": "http://localhost:11434/v1/chat/completions",
       "externalModelName": "llama3"
+    },
+    {
+      "name": "models/deepseek-r1",
+      "displayName": "DeepSeek R1",
+      "provider": "deepseek",
+      "apiKey": "sk-...",
+      "apiUrl": "https://api.deepseek.com/anthropic",
+      "externalModelName": "deepseek-reasoner",
+      "contextWindow": 64000,
+      "reasoningEffort": "high"
     }
   ]
+}
+```
+
+Optional per-model fields:
+
+| Field | Purpose |
+|---|---|
+| `contextWindow` | Context window in tokens. Drives compaction; defaults to 128000 when omitted. |
+| `reasoningEffort` | `low` \| `medium` \| `high` \| `max`, sent as `reasoning_effort` to OpenAI-compatible providers. |
+| `compaction` | `false` to disable auto-compaction for this model only. |
+| `timeout` / `maxRetries` | Per-model request timeout (ms) and retry budget (0–5). |
+
+Agent context settings live in `~/.free-antigravity/context.json`:
+
+```json
+{
+  "enabled": true,
+  "mode": "lite",
+  "envelope": "strict",
+  "keepNativeSystemInstruction": false,
+  "installOnStart": true,
+  "compaction": { "enabled": true, "threshold": 0.8, "tailTurns": 2, "model": "" }
 }
 ```
 
@@ -405,6 +502,22 @@ rm -rf ~/.free-antigravity
 
 ## Changelog
 
+### v1.2.0 — agent context support
+
+- **feat**: Agent context injection, ported from [12errh/antigravity-proxy](https://github.com/12errh/antigravity-proxy)
+  - Ships `agent-context-lite.md` (~3.7K tokens) and the full `agent-context.md`
+  - Three modes: `lite` (default), `strip` (full manual), `passthrough` (off)
+  - Hardened envelope frames the manual as documentation, so example paths and sample listings in the manual cannot be read as runtime state
+  - Tool results for `view_file` on the manual are re-framed with the same rules
+  - Only applies to custom models; Gemini requests keep Antigravity's native prompt
+- **feat**: Automatic context compaction — LLM summarization of older turns when a request crosses 80% of the model's declared window, preserving the last turns verbatim, with truncation fallback
+- **feat**: Per-model `contextWindow` and `reasoningEffort` in `models.json`, plus `antigravity context effort` for reasoning-capable models
+- **feat**: `antigravity context` commands — `status`, `install`, `uninstall`, `show-file`, `set`, `effort`
+- **feat**: Manuals installed to `~/.antigravity/agent-context.md` on every launch, content-hash gated so upgrades reinstall and restarts are free
+- **fix**: `loadCustomModels()` skipped per-model capability registration on the plaintext-key migration path
+- **fix**: Provider whitelist in `schemaValidator` rejected valid providers (`deepseek`, `groq`, `nvidia`, …), silently dropping those models
+- **test**: 71 new tests across 8 files; 88 total, all passing
+
 ### v1.1.0 (2025-05-25)
 
 - **feat**: Update-resilient binary patching system
@@ -465,12 +578,14 @@ If you prefer not to patch, you can manually configure a system-wide proxy inste
 
 ## Contributing
 
-Pull requests welcome at [github.com/vahapogut/free-antigravity-cli](https://github.com/vahapogut/free-antigravity-cli).
+Pull requests welcome at [github.com/kelvinzer0/antigravity-cli](https://github.com/kelvinzer0/antigravity-cli).
 
 
 ## Acknowledgments
 
 - Thanks to the **Antigravity** team for building the `agy` CLI that this project wraps.
+- Thanks to **[@vahapogut](https://github.com/vahapogut)** for [free-antigravity-cli](https://github.com/vahapogut/free-antigravity-cli), which this repository forks.
+- Thanks to **[@12errh](https://github.com/12errh)** for [antigravity-proxy](https://github.com/12errh/antigravity-proxy), the source of the agent context files and the context-injection design.
 - Thanks to all **contributors** who reported issues, tested patches, and submitted PRs.
 - Special thanks to the **open-source AI community** for making multi-provider access possible.
 

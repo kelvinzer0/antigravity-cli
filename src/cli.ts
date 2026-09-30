@@ -12,6 +12,200 @@ import { addModel, removeModel, listModels, ensureConfigDir, saveModels, CustomM
 import { startProxy, getProxyPort, stopProxy } from './proxy';
 import { backupFile, decryptString } from './crypto';
 import { checkAgyCompatibility } from './manifest';
+import {
+  ContextMode,
+  EnvelopeMode,
+  VALID_CONTEXT_MODES,
+  VALID_ENVELOPE_MODES,
+  getContextConfigPath as getContextSettingsPath,
+  loadContextSettings,
+  saveContextSettings,
+} from './context/settings';
+import { getBundledPath, getInstalledPath, ContextVariant, describeContextSource, getGlobalContextDir, readContextFile } from './context/paths';
+import { installAgentContext, removeInstalledContext } from './context/installer';
+import { getReasoningEffortConfig, getReasoningLabel, ReasoningEffort, VALID_REASONING_EFFORTS, setModelReasoningEffort, supportsReasoningEffort } from './context/reasoningEffort';
+import { estimateTextTokens } from './context/tokenEstimator';
+
+// --- Agent context commands ---
+
+function variantLabel(variant: ContextVariant): string {
+  return variant === 'full' ? 'full  (agent-context.md)' : 'lite  (agent-context-lite.md)';
+}
+
+function printContextStatus(): void {
+  const settings = loadContextSettings();
+  console.log('\nAgent Context\n' + '─'.repeat(50));
+  console.log(`  Mode:      ${settings.mode}${settings.enabled ? '' : '  (disabled)'}`);
+  console.log(`  Envelope:  ${settings.envelope}`);
+  console.log(`  Native SI: ${settings.keepNativeSystemInstruction ? 'kept (appended after context)' : 'replaced'}`);
+  console.log(`  Compaction: ${settings.compaction.enabled ? `on @ ${Math.round(settings.compaction.threshold * 100)}%, keep ${settings.compaction.tailTurns} turn(s)` : 'off'}`);
+  console.log(`  Config:    ${getContextSettingsPath()}`);
+  console.log(`  Installed: ${getGlobalContextDir()}\n`);
+
+  for (const variant of ['lite', 'full'] as ContextVariant[]) {
+    const content = readContextFile(variant);
+    const tokens = content ? estimateTextTokens(content) : 0;
+    console.log(`  ${variantLabel(variant)}`);
+    console.log(`    source: ${describeContextSource(variant)}`);
+    console.log(`    size:   ${content ? `${content.length} chars (~${tokens} tokens)` : 'not found'}`);
+    console.log(`    install target: ${getInstalledPath(variant)}`);
+  }
+  console.log('');
+}
+
+async function runContextCommand(sub: string | undefined, rest: string[]): Promise<void> {
+  const settings = loadContextSettings();
+
+  if (!sub || sub === 'status' || sub === 'show') {
+    printContextStatus();
+    return;
+  }
+
+  if (sub === 'install') {
+    const result = installAgentContext();
+    if (result.full && result.lite) {
+      console.log(`Installed agent context to ${getGlobalContextDir()}`);
+      console.log(`  ${result.full}`);
+      console.log(`  ${result.lite}`);
+    } else {
+      console.log('Install incomplete. Reinstall the package or set AGENT_CONTEXT_PATH manually.');
+      if (process.env.ANTIGRAVITY_DEBUG === 'true') {
+        console.debug('Bundled sources:', getBundledPath('full'), getBundledPath('lite'));
+      }
+    }
+    return;
+  }
+
+  if (sub === 'uninstall') {
+    removeInstalledContext();
+    console.log(`Removed installed agent context from ${getGlobalContextDir()}`);
+    return;
+  }
+
+  if (sub === 'show-file') {
+    const variant = (rest[0] === 'full' ? 'full' : 'lite') as ContextVariant;
+    const content = readContextFile(variant);
+    if (!content) {
+      console.error(`No ${variant} context file found. Run "antigravity context install".`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`# ${describeContextSource(variant)}\n`);
+    console.log(content);
+    return;
+  }
+
+  if (sub === 'set') {
+    const [key, ...valueParts] = rest;
+    const value = valueParts.join(' ');
+    if (!key || !value) {
+      console.log('Usage: antigravity context set <mode|envelope|compaction|compaction-threshold|compaction-tail-turns|keep-native> <value>');
+      process.exitCode = 1;
+      return;
+    }
+
+    const next = { ...settings };
+    switch (key) {
+      case 'mode':
+        if (!VALID_CONTEXT_MODES.includes(value as ContextMode)) {
+          console.error(`Invalid mode "${value}". Use one of: ${VALID_CONTEXT_MODES.join(', ')}`);
+          process.exitCode = 1;
+          return;
+        }
+        next.mode = value as ContextMode;
+        break;
+      case 'envelope':
+        if (!VALID_ENVELOPE_MODES.includes(value as EnvelopeMode)) {
+          console.error(`Invalid envelope "${value}". Use one of: ${VALID_ENVELOPE_MODES.join(', ')}`);
+          process.exitCode = 1;
+          return;
+        }
+        next.envelope = value as EnvelopeMode;
+        break;
+      case 'compaction':
+        next.compaction = { ...next.compaction, enabled: value !== 'false' && value !== 'off' };
+        break;
+      case 'compaction-threshold': {
+        const parsed = Number(value);
+        if (!(parsed > 0) || parsed >= 1) {
+          console.error('compaction-threshold must be a number greater than 0 and less than 1 (e.g. 0.8)');
+          process.exitCode = 1;
+          return;
+        }
+        next.compaction = { ...next.compaction, threshold: parsed };
+        break;
+      }
+      case 'compaction-tail-turns': {
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed) || parsed < 0) {
+          console.error('compaction-tail-turns must be a non-negative integer');
+          process.exitCode = 1;
+          return;
+        }
+        next.compaction = { ...next.compaction, tailTurns: parsed };
+        break;
+      }
+      case 'keep-native':
+        next.keepNativeSystemInstruction = value === 'true' || value === 'on';
+        break;
+      default:
+        console.error(`Unknown key "${key}"`);
+        process.exitCode = 1;
+        return;
+    }
+
+    const result = saveContextSettings(next);
+    if (!result.success) {
+      console.error(`Failed to save settings: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`context.${key} = ${value}`);
+    return;
+  }
+
+  if (sub === 'effort') {
+    const [model, effort] = rest;
+    if (!model) {
+      const config = getReasoningEffortConfig();
+      const entries = Object.entries(config.models);
+      console.log('\nReasoning Effort\n' + '─'.repeat(50));
+      if (entries.length === 0) {
+        console.log('  No per-model overrides set.');
+      }
+      for (const [name, level] of entries) {
+        console.log(`  ${name}: ${level}`);
+      }
+      console.log('\nDetected reasoning-capable models:');
+      for (const m of listModels()) {
+        const label = getReasoningLabel(m.externalModelName);
+        if (label) console.log(`  ${m.displayName || m.name} → ${label} (${m.externalModelName})`);
+      }
+      console.log(`\nUsage: antigravity context effort <model> <${VALID_REASONING_EFFORTS.join('|')}>`);
+      console.log('');
+      return;
+    }
+    if (!effort) {
+      console.log('Usage: antigravity context effort <model> <low|medium|high|max|default>');
+      process.exitCode = 1;
+      return;
+    }
+    if (!VALID_REASONING_EFFORTS.includes(effort as ReasoningEffort)) {
+      console.error(`Invalid effort "${effort}". Use one of: ${VALID_REASONING_EFFORTS.join(', ')}`);
+      process.exitCode = 1;
+      return;
+    }
+    const ok = setModelReasoningEffort(model, effort as ReasoningEffort);
+    console.log(ok ? `reasoning_effort for "${model}" = ${effort}` : 'Failed to save reasoning effort config.');
+    if (effort !== 'default' && !supportsReasoningEffort(model)) {
+      console.log(`Note: "${model}" is not in the known reasoning-capable list; the value is still sent if the provider accepts it.`);
+    }
+    return;
+  }
+
+  console.log('Usage: antigravity context <status|install|uninstall|show-file|set|effort>');
+  process.exitCode = 1;
+}
 
 function searchInPath(): string | null {
   try {
@@ -189,6 +383,19 @@ function ensureAgyPatched(binPath: string): void {
   }
 }
 
+/** Keeps ~/.antigravity/agent-context.md in sync on every launch so the agent has a stable path. */
+function ensureAgentContextInstalled(): void {
+  const settings = loadContextSettings();
+  if (!settings.installOnStart) return;
+  try {
+    installAgentContext();
+  } catch (e) {
+    if (process.env.ANTIGRAVITY_DEBUG === 'true') {
+      console.debug('[Debug] Agent context install failed:', (e as Error).message);
+    }
+  }
+}
+
 async function startAndDelegate(agyArgs: string[]): Promise<void> {
   // agy starts interactive mode by default when no flags are given
   const agyBin = getAgyBin();
@@ -208,6 +415,7 @@ async function startAndDelegate(agyArgs: string[]): Promise<void> {
   }
 
   ensureAgyPatched(agyBin);
+  ensureAgentContextInstalled();
   process.stdout.write('Starting proxy... ');
   const port = await ensureProxy();
   console.log(`ready (port ${port})\n`);
@@ -240,7 +448,10 @@ async function main(): Promise<void> {
       for (const m of models) {
         console.log(`  ${m.displayName || m.name}`);
         console.log(`  Provider: ${m.provider}  |  Model: ${m.externalModelName}`);
-        console.log(`  URL: ${m.apiUrl}\n`);
+        console.log(`  URL: ${m.apiUrl}`);
+        if (m.contextWindow) console.log(`  Context window: ${m.contextWindow} tokens`);
+        if (m.reasoningEffort) console.log(`  Reasoning effort: ${m.reasoningEffort}`);
+        console.log('');
       }
       return;
     }
@@ -276,8 +487,26 @@ async function main(): Promise<void> {
           };
           return d[a.provider] || '';
         }},
+        { type: 'input', name: 'contextWindow', message: 'Context window in tokens (blank = default 128000):', default: '' },
+        { type: 'list', name: 'reasoningEffort', message: 'Reasoning effort:', choices: ['default', 'low', 'medium', 'high', 'max'], default: 'default' },
       ]);
-      const r = addModel({ name: 'models/' + answers.modelId, displayName: answers.displayName || answers.modelId, description: '', provider: answers.provider, apiKey: answers.apiKey || 'none', apiUrl: answers.apiUrl, externalModelName: answers.modelId });
+      const contextWindow = answers.contextWindow ? Number(answers.contextWindow) : undefined;
+      if (contextWindow !== undefined && (!Number.isFinite(contextWindow) || contextWindow <= 0)) {
+        console.error('\nContext window must be a positive number.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const r = addModel({
+        name: 'models/' + answers.modelId,
+        displayName: answers.displayName || answers.modelId,
+        description: '',
+        provider: answers.provider,
+        apiKey: answers.apiKey || 'none',
+        apiUrl: answers.apiUrl,
+        externalModelName: answers.modelId,
+        ...(contextWindow ? { contextWindow } : {}),
+        ...(answers.reasoningEffort && answers.reasoningEffort !== 'default' ? { reasoningEffort: answers.reasoningEffort } : {}),
+      });
       console.log(r.success ? `\nModel "${answers.displayName || answers.modelId}" added!\n` : `\nFailed: ${r.error}\n`);
       return;
     }
@@ -320,10 +549,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  // --- Agent context management ---
+  if (cmd === 'context') {
+    await runContextCommand(args[1], args.slice(2));
+    return;
+  }
+
   // --- Info commands ---
   if (cmd === 'configure') {
+    const contextSettings = loadContextSettings();
     console.log(`Models file: ${path.join(os.homedir(), '.free-antigravity', 'models.json')}`);
     console.log(`Models configured: ${listModels().length}`);
+    console.log(`Context file: ${getContextSettingsPath()}`);
+    console.log(`Context mode: ${contextSettings.enabled ? contextSettings.mode : 'disabled'}`);
+    console.log(`Agent context: ${describeContextSource(contextSettings.mode === 'strip' ? 'full' : 'lite')}`);
     console.log(`Proxy: ${getProxyPort() ? `port ${getProxyPort()}` : 'not running'}`);
     console.log(`agy binary: ${getAgyBin()}`);
     return;
@@ -345,9 +584,17 @@ Commands:
   models add   Add a custom model
   models remove <name>  Remove a custom model
   models import  Import models from desktop Antigravity
+  context status  Show agent context mode and sources
+  context install  Install agent-context*.md to ~/.antigravity
+  context uninstall  Remove the installed agent context
+  context show-file [full|lite]  Print the context file
+  context set <key> <value>  Change context settings
+  context effort [model] [level]  Show or set reasoning effort
   configure    Show configuration
   version      Show version
   help         This help
+
+Context modes: passthrough (off) | lite (default) | strip (full manual)
 
 Any other arguments are passed directly to agy CLI.`);
     return;

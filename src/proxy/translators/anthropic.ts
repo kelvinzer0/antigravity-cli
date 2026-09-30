@@ -21,6 +21,7 @@ import {
   StreamContext,
 } from '../shared';
 import { detectModelCapabilitiesByName } from '../modelUtils';
+import { maybeWrapContextToolResult } from '../../context/toolResult';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,7 @@ interface GeminiFunctionCall {
 interface GeminiFunctionResponse {
   name: string;
   response: unknown;
+  args?: Record<string, unknown>;
   id?: string;
 }
 
@@ -228,6 +230,7 @@ export function mapGeminiToAnthropic(geminiBody: GeminiRequestBody, modelName: s
               } else {
                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
               }
+              contentStr = maybeWrapContextToolResult(funcName, p.functionResponse.args, contentStr);
               contentBlocks.push({
                 type: 'tool_result',
                 tool_use_id: toolCallId,

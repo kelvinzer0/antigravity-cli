@@ -25,21 +25,15 @@ export interface CustomModel {
   _slug?: string;
   timeout?: number;
   maxRetries?: number;
+  /** Declared context window in tokens; drives compaction thresholds. */
+  contextWindow?: number;
+  /** Per-model reasoning effort override (low | medium | high | max). */
+  reasoningEffort?: ReasoningEffort;
+  /** Disables compaction for this model regardless of global settings. */
+  compaction?: boolean;
 }
 
-interface GeminiRequestBody {
-  model?: string;
-  modelId?: string;
-  model_id?: string;
-  request?: GeminiRequestBody;
-  systemInstruction?: { parts: { text?: string }[] };
-  contents?: {
-    parts?: { text?: string; functionCall?: unknown; functionResponse?: unknown; thought?: boolean }[];
-    role?: string;
-  }[];
-  tools?: unknown[];
-  generationConfig?: { temperature?: number; maxOutputTokens?: number };
-}
+export type { GeminiRequestBody } from './context/geminiTypes';
 
 // --- State ---
 
@@ -51,6 +45,12 @@ import { detectModelCapabilities } from './proxy/modelUtils';
 import * as registry from './proxy/registry';
 import { decryptString, encryptString } from './crypto';
 import { validateCustomModel } from './schemaValidator';
+import { compactIfNeeded } from './context/compaction';
+import { declareContextWindow, logContextWindows } from './context/contextWindows';
+import { GeminiRequestBody } from './context/geminiTypes';
+import { injectAgentContext } from './context/injector';
+import { getEffortForModel, ReasoningEffort } from './context/reasoningEffort';
+import { loadContextSettings } from './context/settings';
 
 // --- Model Helpers ---
 
@@ -112,6 +112,7 @@ export function loadCustomModels(): CustomModel[] {
         return m;
       });
       fs.writeFileSync(filePath, JSON.stringify({ models: encryptedModels }, null, 2), 'utf-8');
+      registerModelCapabilities(encryptedModels as CustomModel[]);
       return encryptedModels as CustomModel[];
     }
 
@@ -134,11 +135,22 @@ export function loadCustomModels(): CustomModel[] {
         log.warn(`[Proxy] Skipping invalid model at index ${i}: ${validation.error}`);
       }
     }
+    registerModelCapabilities(validModels);
     return validModels;
   } catch (e) {
     log.error('[Proxy] Failed to parse models config:', e);
     return [];
   }
+}
+
+/** Feeds per-model metadata (context window, reasoning support) into the context subsystem. */
+function registerModelCapabilities(models: CustomModel[]): void {
+  for (const m of models) {
+    if (m.contextWindow && m.contextWindow > 0) {
+      declareContextWindow(m.externalModelName, m.contextWindow);
+    }
+  }
+  logContextWindows();
 }
 
 // --- Google Proxy ---
@@ -179,7 +191,55 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
 
 // --- Custom Model Request Handler ---
 
+/**
+ * Applies the agent context to a Gemini request before provider translation.
+ *
+ * Only custom models go through here — requests forwarded to Google's own Gemini
+ * endpoints keep Antigravity's native system instruction, because Gemini already
+ * understands it and injecting a second operating manual would just burn tokens.
+ */
+async function prepareRequestContext(model: CustomModel, geminiBody: GeminiRequestBody): Promise<void> {
+  const settings = loadContextSettings();
+  if (!settings.enabled) return;
+
+  injectAgentContext(geminiBody, {
+    mode: settings.mode,
+    envelope: settings.envelope,
+    keepNativeSystemInstruction: settings.keepNativeSystemInstruction,
+  });
+
+  const compaction = { ...settings.compaction };
+  if (typeof model.compaction === 'boolean') compaction.enabled = model.compaction;
+
+  try {
+    await compactIfNeeded(geminiBody, model, compaction);
+  } catch (e) {
+    log.warn(`[Proxy] Compaction skipped: ${(e as Error).message}`);
+  }
+}
+
 function handleCustomModelRequest(
+  res: http.ServerResponse, model: CustomModel, geminiBody: GeminiRequestBody,
+  isStream: boolean, retryCount = 0,
+): void {
+  prepareRequestContext(model, geminiBody)
+    .then(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount))
+    .catch((e) => {
+      log.error('[Proxy] Context preparation failed:', e);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Context preparation failed: ' + (e as Error).message } }));
+      }
+    });
+}
+
+/** Resolves the reasoning effort for a model: explicit per-model setting wins, then the stored map. */
+function resolveReasoningEffort(model: CustomModel): ReasoningEffort | null {
+  if (model.reasoningEffort && model.reasoningEffort !== 'default') return model.reasoningEffort;
+  return getEffortForModel(model.externalModelName);
+}
+
+function dispatchCustomModelRequest(
   res: http.ServerResponse, model: CustomModel, geminiBody: GeminiRequestBody,
   isStream: boolean, retryCount = 0,
 ): void {
@@ -187,11 +247,17 @@ function handleCustomModelRequest(
   const REQUEST_TIMEOUT_MS = model.timeout || 120_000;
 
   const provider = model.provider === 'custom' || model.provider === 'openrouter' ? 'openai' : model.provider;
-  const payload = registry.translateRequest(provider, geminiBody, model.externalModelName);
+  const payload = registry.translateRequest(provider, geminiBody, model.externalModelName) as Record<string, unknown>;
   const headers = registry.getProviderHeaders(provider, model.apiKey);
 
   if (isStream && registry.supportsStreaming(provider)) {
-    (payload as Record<string, unknown>).stream = true;
+    payload.stream = true;
+  }
+
+  const effort = resolveReasoningEffort(model);
+  if (effort && provider !== 'anthropic') {
+    payload.reasoning_effort = effort;
+    log.info(`[Proxy] reasoning_effort=${effort} for ${model.externalModelName}`);
   }
 
   let finalUrlStr = model.apiUrl;
@@ -234,7 +300,7 @@ function handleCustomModelRequest(
         apiRes.on('end', () => {
           log.error(`[Proxy] Stream API error (${apiRes.statusCode}): ${errorBody.substring(0, 200)}`);
           if (retryCount < MAX_RETRIES) {
-            setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
+            setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
             return;
           }
           res.writeHead(apiRes.statusCode!, { 'Content-Type': 'application/json' });
@@ -295,11 +361,11 @@ function handleCustomModelRequest(
       apiRes.on('data', (chunk: Buffer) => (body += chunk));
       apiRes.on('end', () => {
         if (apiRes.statusCode! >= 500 && retryCount < MAX_RETRIES) {
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * Math.pow(2, retryCount));
+          setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * Math.pow(2, retryCount));
           return;
         }
         if (apiRes.statusCode === 429 && retryCount < MAX_RETRIES) {
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 2000 * Math.pow(2, retryCount));
+          setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 2000 * Math.pow(2, retryCount));
           return;
         }
         if (apiRes.statusCode! >= 400) {
@@ -318,7 +384,7 @@ function handleCustomModelRequest(
           res.end(JSON.stringify({ response: mapped, traceId: '', metadata: {} }));
         } catch (e) {
           if (retryCount < MAX_RETRIES) {
-            setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
+            setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
             return;
           }
           res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -331,7 +397,7 @@ function handleCustomModelRequest(
   request.setTimeout(REQUEST_TIMEOUT_MS, () => {
     request.destroy();
     if (retryCount < MAX_RETRIES) {
-      setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
+      setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
       return;
     }
     if (!res.headersSent) {
@@ -343,7 +409,7 @@ function handleCustomModelRequest(
   request.on('error', (err) => {
     log.error('[Proxy] Custom Model Request Error:', err);
     if (retryCount < MAX_RETRIES) {
-      setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
+      setTimeout(() => dispatchCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
       return;
     }
     if (!res.headersSent) {

@@ -17,6 +17,34 @@ interface ValidationResult {
 }
 
 /**
+ * Providers the translator registry can route. Kept in sync with the OpenAI-compatible
+ * and Anthropic-compatible sets in src/proxy/registry.ts plus the native Google adapter.
+ */
+export const SUPPORTED_PROVIDERS = [
+  'openai',
+  'anthropic',
+  'google',
+  'ollama',
+  'custom',
+  'openrouter',
+  'deepseek',
+  'groq',
+  'mistral',
+  'cerebras',
+  'kimi',
+  'fireworks',
+  'lmstudio',
+  'llamacpp',
+  'nvidia',
+  'opencode',
+  'codestral',
+  'wafer',
+  'zai',
+];
+
+const VALID_REASONING_EFFORTS = ['default', 'low', 'medium', 'high', 'max'];
+
+/**
  * Validates a Gemini candidate object structure.
  */
 export function validateCandidate(candidate: unknown): ValidationResult {
@@ -101,9 +129,8 @@ export function validateCustomModel(model: unknown): ValidationResult {
 
   const provider = m.provider as string;
   // Validate provider is one of the supported types
-  const validProviders = ['openai', 'anthropic', 'google', 'ollama', 'custom', 'openrouter'];
-  if (!validProviders.includes(provider)) {
-    return { valid: false, error: `Unsupported provider: ${provider}. Must be one of: ${validProviders.join(', ')}` };
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    return { valid: false, error: `Unsupported provider: ${provider}. Must be one of: ${SUPPORTED_PROVIDERS.join(', ')}` };
   }
 
   const apiUrl = m.apiUrl as string;
@@ -129,6 +156,19 @@ export function validateCustomModel(model: unknown): ValidationResult {
   }
   if (m.allowUnauthorized !== undefined && typeof m.allowUnauthorized !== 'boolean') {
     return { valid: false, error: 'allowUnauthorized must be a boolean' };
+  }
+  if (m.contextWindow !== undefined) {
+    if (typeof m.contextWindow !== 'number' || !Number.isFinite(m.contextWindow) || m.contextWindow <= 0) {
+      return { valid: false, error: 'contextWindow must be a positive number of tokens' };
+    }
+  }
+  if (m.compaction !== undefined && typeof m.compaction !== 'boolean') {
+    return { valid: false, error: 'compaction must be a boolean' };
+  }
+  if (m.reasoningEffort !== undefined) {
+    if (typeof m.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(m.reasoningEffort)) {
+      return { valid: false, error: `reasoningEffort must be one of: ${VALID_REASONING_EFFORTS.join(', ')}` };
+    }
   }
 
   return { valid: true };
