@@ -1,8 +1,8 @@
 # Free Antigravity CLI
 
-[![npm version](https://img.shields.io/npm/v/free-antigravity-cli.svg?style=flat-edge)](https://www.npmjs.com/package/free-antigravity-cli)
-[![license](https://img.shields.io/github/license/vahapogut/free-antigravity-cli.svg?style=flat-edge)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/vahapogut/free-antigravity-cli.svg?style=flat-edge)](https://github.com/vahapogut/free-antigravity-cli/stargazers)
+[![npm version](https://img.shields.io/npm/v/%40kelvinzero%2Fantigravity-cli.svg?style=flat-edge)](https://www.npmjs.com/package/@kelvinzero/antigravity-cli)
+[![license](https://img.shields.io/github/license/kelvinzer0/antigravity-cli.svg?style=flat-edge)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/kelvinzer0/antigravity-cli.svg?style=flat-edge)](https://github.com/kelvinzer0/antigravity-cli/stargazers)
 
 **Open Source Community Edition** — Wraps the official [Antigravity CLI](https://antigravity.google/cli) (`agy`) with custom AI model support.
 
@@ -119,8 +119,8 @@ Auto-detected reasoning families: DeepSeek R-series, OpenAI o-series, NVIDIA ste
 # 1. Install official Antigravity CLI first
 curl -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd
 
-# 2. Install Free Antigravity CLI
-npm install -g free-antigravity-cli
+# 2. Install Antigravity CLI
+npm install -g @kelvinzero/antigravity-cli
 
 # 3. Add your custom models
 antigravity models add
@@ -194,15 +194,15 @@ Any arguments not listed above are passed directly to `agy` CLI.
 ### npm (Recommended)
 
 ```bash
-npm install -g free-antigravity-cli
+npm install -g @kelvinzero/antigravity-cli
 antigravity
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/vahapogut/free-antigravity-cli.git
-cd free-antigravity-cli
+git clone https://github.com/kelvinzer0/antigravity-cli.git
+cd antigravity-cli
 npm install
 npm run build
 npm link
@@ -352,7 +352,7 @@ Free Antigravity CLI v1.1.0+ includes several mechanisms to stay compatible when
 ```
 agy binary updated by Google
          ↓
-free-antigravity-cli starts
+antigravity-cli starts
          ↓
 ├─ Runtime scan: discovers ALL *.googleapis.com URLs
 ├─ Flexible patch: replaces them with localhost proxy
@@ -361,7 +361,7 @@ free-antigravity-cli starts
 └─ Success → Custom models available in agy selector
 ```
 
-> **Note:** If Google makes a radical change (e.g. removes all plaintext URLs or switches to a completely different architecture), binary patching may no longer be possible. In that case, please [open an issue](https://github.com/vahapogut/free-antigravity-cli/issues).
+> **Note:** If Google makes a radical change (e.g. removes all plaintext URLs or switches to a completely different architecture), binary patching may no longer be possible. In that case, please [open an issue](https://github.com/kelvinzer0/antigravity-cli/issues).
 
 
 ## Development
@@ -443,10 +443,10 @@ cp ~/.local/share/agy/bin/agy.bak-<version>-<timestamp> ~/.local/share/agy/bin/a
 Copy-Item "$env:LOCALAPPDATA\agy\bin\agy.exe.bak-*" "$env:LOCALAPPDATA\agy\bin\agy.exe"
 ```
 
-If the issue persists after a rollback, try updating `free-antigravity-cli`:
+If the issue persists after a rollback, try updating `@kelvinzero/antigravity-cli`:
 
 ```bash
-npm install -g free-antigravity-cli@latest
+npm install -g @kelvinzero/antigravity-cli@latest
 ```
 
 **Custom models not appearing in agy**
@@ -490,7 +490,7 @@ Yes. On macOS, the CLI automatically re-signs the patched binary with `codesign 
 
 ```bash
 # Uninstall the CLI
-npm uninstall -g free-antigravity-cli
+npm uninstall -g @kelvinzero/antigravity-cli
 
 # Remove configuration
 rm -rf ~/.free-antigravity

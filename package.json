@@ -1,5 +1,5 @@
 {
-  "name": "free-antigravity-cli",
+  "name": "@kelvinzero/antigravity-cli",
   "version": "1.2.0",
   "description": "Open-source community CLI for Antigravity - supports custom AI models (OpenAI, Anthropic, Ollama, OpenRouter, Google AI Studio) alongside Gemini, with agent-context injection so custom models behave like Antigravity agents",
   "homepage": "https://github.com/kelvinzer0/antigravity-cli",
@@ -15,7 +15,11 @@
   "main": "dist/cli.js",
   "bin": {
     "antigravity": "./dist/cli.js",
-    "free-antigravity": "./dist/cli.js"
+    "antigravity-cli": "./dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "build": "npx tsc",
