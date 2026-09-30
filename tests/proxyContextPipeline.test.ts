@@ -20,7 +20,7 @@ import { loadCustomModels, startProxy, stopProxy, generateModelPlaceholderId, Cu
 import { getContextWindow } from '../src/context/contextWindows';
 import { stopCleanupInterval } from '../src/proxy/shared';
 
-const UPSTREAM_PORT = 19_995;
+const UPSTREAM_PORT = 0; // 0 lets the OS pick a free port; jest runs suites in parallel.
 
 function modelsPath(): string {
   return path.join(process.env.AG_TEST_HOME as string, '.free-antigravity', 'models.json');
@@ -57,6 +57,7 @@ async function postToProxy(port: number, payload: string): Promise<number> {
 
 describe('Proxy context pipeline', () => {
   let upstream: http.Server;
+  let upstreamPort = 0;
   let summaryRequests = 0;
   let forwardedMessageCounts: number[] = [];
 
@@ -74,7 +75,11 @@ describe('Proxy context pipeline', () => {
         res.end(JSON.stringify({ choices: [{ message: { content: isSummary ? '## Objective\n- compacted' : 'ok' } }] }));
       });
     });
-    upstream.listen(UPSTREAM_PORT, '127.0.0.1', done);
+    upstream.on('listening', () => {
+      upstreamPort = (upstream.address() as import('net').AddressInfo).port;
+      done();
+    });
+    upstream.listen(UPSTREAM_PORT, '127.0.0.1');
   });
 
   afterAll((done) => {
@@ -100,7 +105,7 @@ describe('Proxy context pipeline', () => {
         displayName: 'Migrate Model',
         provider: 'openai',
         apiKey: 'sk-plaintext',
-        apiUrl: `http://127.0.0.1:${UPSTREAM_PORT}/v1/chat/completions`,
+        apiUrl: `http://127.0.0.1:${upstreamPort}/v1/chat/completions`,
         externalModelName: 'migrate-4o',
         contextWindow: 4000,
       },
@@ -124,7 +129,7 @@ describe('Proxy context pipeline', () => {
         provider: 'openai',
         apiKey: 'enc:c2VjcmV0',
         encrypted: true,
-        apiUrl: `http://127.0.0.1:${UPSTREAM_PORT}/v1/chat/completions`,
+        apiUrl: `http://127.0.0.1:${upstreamPort}/v1/chat/completions`,
         externalModelName: 'compact-4o',
         contextWindow: 4000,
       },
